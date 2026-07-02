@@ -121,7 +121,7 @@ namespace jvmscan {
         };
 
         try {
-            std::regex agentRe(R"(-javaagent:(?:"([^"]+)"|([^\s"]+)))", std::regex_constants::icase);
+            std::regex agentRe(R"agent(-javaagent:(?:"([^"]+)"|([^\s"]+)))agent", std::regex_constants::icase);
             auto begin = std::sregex_iterator(cmdLine.begin(), cmdLine.end(), agentRe);
             for (auto it = begin; it != std::sregex_iterator(); ++it) {
                 std::string agentPath = (*it)[1].matched ? (*it)[1].str() : (*it)[2].str();
