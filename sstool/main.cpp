@@ -164,29 +164,51 @@ void runMemoryScan() {
 }
 
 void runModsFolderScanMenu() {
+    // Clear the input buffer if there's a leftover newline
+    if (std::cin.peek() == '\n') std::cin.ignore();
+
     wchar_t* appData = _wgetenv(L"USERPROFILE");
     std::filesystem::path defaultPath = appData
         ? std::filesystem::path(appData) / L"AppData" / L"Roaming" / L".minecraft" / L"mods"
         : std::filesystem::path();
 
-    std::cout << "Enter path to the mods folder (press Enter for default";
-    if (!defaultPath.empty()) std::cout << ": " << defaultPath.string();
-    std::cout << "): ";
-    std::cin.ignore();
+    std::cout << "\n[Mods Scanner]\n";
+    std::cout << "You can drag and drop the folder here or type the path manually.\n";
+    std::cout << "Default path: " << (defaultPath.empty() ? "Not found" : defaultPath.string()) << "\n";
+    std::cout << "Enter mods folder path (or press Enter for default): ";
+
     std::string input;
     std::getline(std::cin, input);
 
+    // Remove quotes if the user dragged and dropped the folder
+    if (!input.empty() && input.front() == '"' && input.back() == '"') {
+        input = input.substr(1, input.size() - 2);
+    }
+
     std::filesystem::path modsPath = input.empty() ? defaultPath : std::filesystem::path(input);
+
     if (modsPath.empty()) {
-        std::cout << "No path given and no default could be determined.\n";
+        std::cout << "[!] No path provided and default could not be determined.\n";
+        return;
+    }
+
+    if (!std::filesystem::exists(modsPath)) {
+        std::cout << "[!] The specified path does not exist: " << modsPath.string() << "\n";
         return;
     }
 
     modscan::runModsFolderScan(modsPath.wstring());
 }
 
-int main() {
+int main(int argc, char* argv[]) {
     std::cout << "Screenshare tool | Made by lvstrng | v1.2\n";
+
+    // Handle command line argument for mods scan
+    if (argc > 2 && std::string(argv[1]) == "--mods") {
+        std::string path = argv[2];
+        modscan::runModsFolderScan(std::filesystem::path(path).wstring());
+        return 0;
+    }
 
     while (true) {
         std::cout << "\nWhat do you want to do?\n"
