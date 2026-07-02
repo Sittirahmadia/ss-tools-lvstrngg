@@ -1,5 +1,6 @@
 #pragma once
 #define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 #include <string>
 #include <iostream>
@@ -7,8 +8,7 @@
 #include <string_view>
 #include <set>
 #include <algorithm>
-
-typedef unsigned char byte;
+#include <cstdint>
 
 // One matched string, with enough context to explain *why* it matched.
 struct PatternHit {
@@ -19,6 +19,11 @@ struct PatternHit {
 };
 
 // Builds the UTF-16LE byte encoding of an ASCII pattern (each char -> char,0x00).
+// The JVM stores Java Strings internally as UTF-16 (or Latin-1/compact-strings
+// with a similar 2-bytes-per-char layout pre-Java 9 opt-out), so plaintext
+// literals baked into cheat clients frequently sit in memory as
+// "A\0u\0t\0o\0C\0r\0y\0s\0t\0a\0l\0" rather than "AutoCrystal". A pure
+// single-byte scanner silently misses every one of those.
 static std::vector<char> toUtf16LeBytes(std::string_view ascii) {
     std::vector<char> out;
     out.reserve(ascii.size() * 2);
@@ -29,11 +34,19 @@ static std::vector<char> toUtf16LeBytes(std::string_view ascii) {
     return out;
 }
 
-// Scans hProcess's committed, readable memory for each pattern in `patterns`.
-static std::vector<PatternHit> pattern_scan(HANDLE hProcess, const std::vector<std::string_view>& patterns) {
+// Scans hProcess's committed, readable memory for each pattern in `patterns`,
+// in both raw ASCII/UTF-8 form and UTF-16LE form. Regions are read and
+// searched independently by VirtualQueryEx, which means a pattern could be
+// split across the boundary between two regions and get missed entirely by
+// a naive per-region search. Since some of our patterns are long
+// fully-qualified class names (50+ chars, up to 100+ bytes once doubled for
+// UTF-16), this is carried over explicitly below rather than left as a
+// silent gap.
+std::vector<PatternHit> pattern_scan(HANDLE hProcess, const std::vector<std::string_view>& patterns) {
     SYSTEM_INFO sys_info;
     GetSystemInfo(&sys_info);
 
+    // Precompute both encodings once, not once per region.
     struct Encoded {
         std::string_view ascii;
         std::vector<char> utf16;
@@ -46,15 +59,16 @@ static std::vector<PatternHit> pattern_scan(HANDLE hProcess, const std::vector<s
         maxPatternLen = std::max({ maxPatternLen, p.size(), encoded.back().utf16.size() });
     }
 
-    std::set<uintptr_t> foundAddresses;
+    std::set<uintptr_t> foundAddresses; // dedupes boundary-scan vs main-scan hits, across both encodings
     std::vector<PatternHit> results;
     MEMORY_BASIC_INFORMATION memInfo;
-    BYTE* address = (BYTE*)sys_info.lpMinimumApplicationAddress;
-    std::vector<BYTE> carry;
-    uintptr_t carryEndAddr = 0;
+    uint8_t* address = reinterpret_cast<uint8_t*>(sys_info.lpMinimumApplicationAddress);
+
+    std::vector<uint8_t> carry;      // tail bytes of the previous region's buffer
+    uintptr_t carryEndAddr = 0;   // address immediately after the carried bytes
 
     auto reportHit = [&](uintptr_t addr, std::string_view patternText, bool isUtf16, bool isBoundary) {
-        if (!foundAddresses.insert(addr).second) return;
+        if (!foundAddresses.insert(addr).second) return; // already reported (e.g. same offset in both scans)
         std::cout << "[*] Found string \"" << patternText << "\""
                    << (isUtf16 ? " (utf16)" : "")
                    << (isBoundary ? " (boundary)" : "")
@@ -63,6 +77,14 @@ static std::vector<PatternHit> pattern_scan(HANDLE hProcess, const std::vector<s
     };
 
     while (address < sys_info.lpMaximumApplicationAddress && VirtualQueryEx(hProcess, address, &memInfo, sizeof(memInfo))) {
+        // Widened from MEM_PRIVATE-only: class/string data relevant to a
+        // loaded cheat mod can also live in MEM_MAPPED regions (e.g. memory
+        // mapped from the jar/class files themselves, or mapped heap
+        // segments depending on JVM/GC configuration), and mods can also be
+        // patched into MEM_IMAGE-backed regions post-classload. Restricting
+        // to MEM_PRIVATE was silently skipping those. PAGE_GUARD/PAGE_NOACCESS
+        // pages are still excluded since ReadProcessMemory can't touch them
+        // anyway.
         bool readableProtect = (memInfo.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE |
                                                      PAGE_READONLY | PAGE_EXECUTE_READ |
                                                      PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY)) != 0
@@ -71,14 +93,19 @@ static std::vector<PatternHit> pattern_scan(HANDLE hProcess, const std::vector<s
             (memInfo.Type == MEM_PRIVATE || memInfo.Type == MEM_MAPPED || memInfo.Type == MEM_IMAGE);
 
         if (scannable) {
-            std::vector<BYTE> buffer(memInfo.RegionSize);
+            std::vector<uint8_t> buffer(memInfo.RegionSize);
             SIZE_T bytesRead;
             if (ReadProcessMemory(hProcess, memInfo.BaseAddress, buffer.data(), buffer.size(), &bytesRead)) {
+
+                // 1) Boundary check: stitch the end of the previous region's
+                //    buffer to the start of this one and search just that
+                //    seam, so patterns split across the two regions aren't lost.
                 if (!carry.empty() && maxPatternLen > 1) {
-                    size_t seamLen = std::min((size_t)buffer.size(), maxPatternLen - 1);
-                    std::vector<BYTE> seam(carry);
+                    size_t seamLen = std::min(buffer.size(), maxPatternLen - 1);
+                    std::vector<uint8_t> seam(carry);
                     seam.insert(seam.end(), buffer.begin(), buffer.begin() + seamLen);
                     std::string_view seamView(reinterpret_cast<char*>(seam.data()), seam.size());
+
                     for (const auto& enc : encoded) {
                         size_t pos = 0;
                         while ((pos = seamView.find(enc.ascii, pos)) != std::string_view::npos) {
@@ -96,6 +123,7 @@ static std::vector<PatternHit> pattern_scan(HANDLE hProcess, const std::vector<s
                     }
                 }
 
+                // 2) Normal in-region scan, both encodings.
                 std::string_view view(reinterpret_cast<char*>(buffer.data()), bytesRead);
                 for (const auto& enc : encoded) {
                     size_t pos = 0;
@@ -113,20 +141,23 @@ static std::vector<PatternHit> pattern_scan(HANDLE hProcess, const std::vector<s
                     }
                 }
 
+                // carry the tail of this buffer forward for the next region's seam check
                 if (maxPatternLen > 1) {
-                    size_t tailLen = std::min((size_t)buffer.size(), maxPatternLen - 1);
+                    size_t tailLen = std::min(buffer.size(), maxPatternLen - 1);
                     carry.assign(buffer.end() - tailLen, buffer.end());
                     carryEndAddr = reinterpret_cast<uintptr_t>(memInfo.BaseAddress) + buffer.size();
                 } else {
                     carry.clear();
                 }
             } else {
-                carry.clear();
+                carry.clear(); // unreadable region breaks contiguity assumptions; don't stitch across it
             }
         } else {
-            carry.clear();
+            carry.clear(); // non-scannable region breaks contiguity too
         }
-        address = (BYTE*)(memInfo.BaseAddress) + memInfo.RegionSize;
+
+        address = reinterpret_cast<uint8_t*>(memInfo.BaseAddress) + memInfo.RegionSize;
     }
+
     return results;
 }
