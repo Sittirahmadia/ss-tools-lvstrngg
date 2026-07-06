@@ -1,6 +1,7 @@
 #pragma once
 #define NOMINMAX
 #include <Windows.h>
+#include <Shellapi.h>
 #include <TlHelp32.h>
 #include <string>
 #include <vector>

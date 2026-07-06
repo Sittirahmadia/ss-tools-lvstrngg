@@ -145,4 +145,67 @@ namespace jarutil {
         return url.substr(hostStart, hostEnd == std::string::npos ? std::string::npos : hostEnd - hostStart);
     }
 
+    // ---- Missing functions for EnhancedJarScan.h ----
+
+    // List all files in the jar by extracting it to a temp directory first.
+    inline std::vector<std::string> listEntries(const std::string& jarPath) {
+        fs::path jar(jarPath);
+        fs::path temp = makeTempDir(jar.stem().wstring());
+        if (!extractArchive(jar, temp)) {
+            removeDirBestEffort(temp);
+            return {};
+        }
+
+        std::vector<std::string> entries;
+        std::error_code ec;
+        for (auto& p : fs::recursive_directory_iterator(temp, ec)) {
+            if (p.is_regular_file()) {
+                std::string rel = fs::relative(p.path(), temp).string();
+                // Normalize slashes for jar entry style
+                std::replace(rel.begin(), rel.end(), '\\', '/');
+                entries.push_back(rel);
+            }
+        }
+        removeDirBestEffort(temp);
+        return entries;
+    }
+
+    // Read the whole jar as a single string (useful for grep-like scanning).
+    inline std::string readAllText(const std::string& jarPath) {
+        fs::path jar(jarPath);
+        fs::path temp = makeTempDir(jar.stem().wstring() + L"_text");
+        if (!extractArchive(jar, temp)) {
+            removeDirBestEffort(temp);
+            return {};
+        }
+
+        std::string combined;
+        std::error_code ec;
+        for (auto& p : fs::recursive_directory_iterator(temp, ec)) {
+            if (p.is_regular_file()) {
+                combined += readFileBytes(p.path());
+            }
+        }
+        removeDirBestEffort(temp);
+        return combined;
+    }
+
+    // Read a specific entry from the jar.
+    inline std::string readEntry(const std::string& jarPath, const std::string& entryName) {
+        fs::path jar(jarPath);
+        fs::path temp = makeTempDir(jar.stem().wstring() + L"_entry");
+        if (!extractArchive(jar, temp)) {
+            removeDirBestEffort(temp);
+            return {};
+        }
+
+        fs::path entryPath = temp / entryName;
+        std::string content;
+        if (fs::exists(entryPath)) {
+            content = readFileBytes(entryPath);
+        }
+        removeDirBestEffort(temp);
+        return content;
+    }
+
 } // namespace jarutil
