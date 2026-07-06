@@ -10,6 +10,10 @@
 #include "ModuleScan.h"
 #include "SystemForensics.h"
 #include "MacroSignature.h"
+#include "AdvancedMemoryScan.h"
+#include "LauncherDetect.h"
+#include "EnhancedJarScan.h"
+#include "ForensicsExtended.h"
 #include <filesystem>
 #include <cstdlib>
 #include <string>
@@ -866,7 +870,7 @@ void runMacroSoftwareScan() {
         con::ok("No macro processes or windows found.");
     }
 
-    con::step(3, 4, "Scanning Installed Programs (Registry)");
+    con::step(3, 5, "Scanning Installed Programs (Registry)");
 
     auto installHits = scanInstalledPrograms(macroKeywords);
 
@@ -878,11 +882,26 @@ void runMacroSoftwareScan() {
         con::ok("No macro software found in installed programs.");
     }
 
-    con::step(4, 4, "Executable Signature Sweep (Embedded Strings + Import Table)");
+    // If macro is installed but NOT currently running, offer to launch it
+    // so the SS-er can see it on screen as evidence. User must confirm.
+    if (!installHits.empty() && liveHits.empty()) {
+        con::step(4, 5, "Macro App Found (Not Running) -- Launch Offer");
+        auto macroExes = findInstalledMacroExes();
+        for (const auto& app : macroExes) {
+            offerToLaunchMacroApp(app);
+        }
+    } else if (!liveHits.empty()) {
+        con::step(4, 5, "Macro Already Running -- Skipping Launch Offer");
+        con::ok("App is already running -- window should be visible above.");
+    } else {
+        con::step(4, 5, "No Installed Macro Found");
+        con::ok("No macro software installed.");
+    }
+
+    con::step(5, 5, "Executable Signature Sweep (Embedded Strings + Import Table)");
     con::dim("Checking every running process' exe on disk for known build strings");
     con::dim("(\"macros-unprotected.pdb\", \"AVMacro\" RTTI, \"/hwidLogin\") and the");
-    con::dim("SetWindowsHookExW + SendInput import combo -- this still catches a");
-    con::dim("copy that's been renamed or rebuilt with a different packer.\n");
+    con::dim("SetWindowsHookExW + SendInput import combo -- catches renamed copies.\n");
 
     auto sigMatches = macrosig::scanAllProcessesForSignatures();
 
@@ -992,9 +1011,194 @@ void runSystemForensicsScan() {
 }
 
 // =====================================================================
+// Enhanced JAR Scan standalone
+// =====================================================================
+void runEnhancedJarScan() {
+    con::header("ENHANCED JAR SCAN  --  Deep Bytecode + Obfuscation Analysis");
+
+    con::step(1, 2, "Select Mods Folder");
+    con::dim("Auto-detecting Minecraft installations...\n");
+
+    auto instances = launcherdetect::detectAll();
+    std::filesystem::path modsPath;
+
+    if (!instances.empty()) {
+        con::subheader("Detected Installations");
+        launcherdetect::printInstances(instances);
+        std::cout << "\n";
+        con::prompt("Choose instance (1-" + std::to_string(instances.size()) + "), or 0 for manual path:");
+        int c = readInt();
+        if (c >= 1 && c <= (int)instances.size()) {
+            modsPath = instances[c - 1].modsDir;
+            con::ok("Using: " + modsPath.string());
+        }
+    }
+
+    if (modsPath.empty()) {
+        con::prompt("Enter mods folder path:");
+        std::string line;
+        std::getline(std::cin, line);
+        modsPath = line;
+    }
+
+    std::error_code ec;
+    if (!std::filesystem::exists(modsPath, ec)) {
+        con::bad("Path does not exist: " + modsPath.string());
+        waitEnter(); return;
+    }
+
+    con::step(2, 2, "Deep JAR Analysis");
+    con::dim("Checks: cheat strings, obfuscation ratio, mixin targets,");
+    con::dim("        obfuscator fingerprint, native libs, ASM usage,");
+    con::dim("        fullwidth Unicode evasion, ghost-client impersonation\n");
+
+    auto results = enhancedjarscan::scanDirectory(modsPath);
+    enhancedjarscan::printResults(results);
+
+    int flagged = 0;
+    for (const auto& r : results) if (r.flagged()) flagged++;
+    con::resultSummary(flagged == 0, flagged, "suspicious jar(s)");
+    waitEnter();
+}
+
+// =====================================================================
+// Advanced Memory Scan (v2) -- multithreaded, confidence scores
+// =====================================================================
+void runAdvancedMemoryScan() {
+    con::header("ADVANCED MEMORY SCAN  v2  --  Multi-threaded + Confidence Scores");
+
+    con::step(1, 2, "Select Minecraft Process");
+    HANDLE handle = resolveJavawTarget();
+    if (!handle) { con::bad("No process selected."); waitEnter(); return; }
+    DWORD pid = GetProcessId(handle);
+
+    con::step(2, 2, "Scanning Memory");
+    con::dim("Multi-threaded scanning with XOR decoding + UTF-16 + fullwidth normalization\n");
+
+    advscan::ScanConfig cfg;
+    cfg.tryXorKeys  = true;
+    cfg.tryUtf16    = true;
+    cfg.useThreads  = true;
+
+    auto result = advscan::scanProcess(handle, cfg);
+    CloseHandle(handle);
+
+    advscan::printResults(result);
+
+    con::resultSummary(result.clients.empty(), (int)result.allHits.size(), "cheat signature(s)");
+    waitEnter();
+}
+
+// =====================================================================
+// Smart Auto-Scan -- auto-detect launcher + run all relevant scans
+// =====================================================================
+void runSmartAutoScan() {
+    con::header("SMART AUTO SCAN  --  Auto-Detect Minecraft + Full Analysis");
+
+    con::step(1, 4, "Detecting Minecraft Installations");
+    auto instances = launcherdetect::detectAll();
+    launcherdetect::printInstances(instances);
+
+    if (instances.empty()) {
+        con::warn("No Minecraft installations found.");
+        waitEnter();
+        return;
+    }
+
+    // Pick instance: prefer active, else let user choose
+    int chosen = -1;
+    for (int i = 0; i < (int)instances.size(); i++) {
+        if (instances[i].isActive) { chosen = i; break; }
+    }
+
+    if (chosen == -1) {
+        con::prompt("Choose instance to scan (1-" + std::to_string(instances.size()) + "):");
+        int c = readInt();
+        if (c < 1 || c > (int)instances.size()) {
+            con::bad("Invalid choice."); waitEnter(); return;
+        }
+        chosen = c - 1;
+    } else {
+        con::ok("Auto-selected active instance: " + instances[chosen].instanceName);
+    }
+
+    const auto& inst = instances[chosen];
+    std::cout << "\n";
+    con::info("Scanning: " + inst.launcherName + " -- " + inst.instanceName);
+    con::dim(inst.rootDir.string());
+
+    // Step 2: Enhanced JAR scan
+    con::step(2, 4, "Deep JAR Analysis (Enhanced)");
+    std::error_code ec;
+    if (std::filesystem::exists(inst.modsDir, ec)) {
+        auto jarResults = enhancedjarscan::scanDirectory(inst.modsDir);
+        enhancedjarscan::printResults(jarResults);
+        int flagged = 0;
+        for (const auto& r : jarResults) if (r.flagged()) flagged++;
+        con::resultSummary(flagged == 0, flagged, "suspicious jar(s)");
+    } else {
+        con::warn("No mods folder found for this instance.");
+    }
+
+    // Step 3: Extended forensics
+    con::step(3, 4, "Extended Forensics (Logs, Configs, Temp, Clipboard)");
+    forensicsext::runFullForensics(inst.rootDir);
+
+    // Step 4: Live memory scan if MC is running
+    con::step(4, 4, "Live Memory Scan (if Minecraft is running)");
+    HANDLE javaHandle = resolveJavawTarget();
+    if (javaHandle) {
+        advscan::ScanConfig cfg;
+        auto memResult = advscan::scanProcess(javaHandle, cfg);
+        CloseHandle(javaHandle);
+        advscan::printResults(memResult);
+        con::resultSummary(memResult.clients.empty(), (int)memResult.allHits.size(), "memory hit(s)");
+    } else {
+        con::info("Minecraft not running -- skipping memory scan.");
+    }
+
+    waitEnter();
+}
+
+// =====================================================================
+// Extended Forensics standalone menu
+// =====================================================================
+void runExtendedForensics() {
+    con::header("EXTENDED FORENSICS  --  Logs, Configs, Temp, Clipboard");
+
+    con::step(1, 2, "Locate Minecraft Root");
+    auto instances = launcherdetect::detectAll();
+
+    std::filesystem::path mcRoot;
+    if (!instances.empty()) {
+        // Find first with a valid root
+        for (const auto& inst : instances) {
+            std::error_code ec;
+            if (std::filesystem::exists(inst.rootDir, ec)) {
+                mcRoot = inst.rootDir;
+                con::ok("Using: " + inst.launcherName + " -- " + inst.rootDir.string());
+                break;
+            }
+        }
+    }
+
+    if (mcRoot.empty()) {
+        con::prompt("Enter .minecraft path manually:");
+        std::string line;
+        std::getline(std::cin, line);
+        mcRoot = line;
+    }
+
+    con::step(2, 2, "Running Forensic Checks");
+    forensicsext::runFullForensics(mcRoot);
+
+    waitEnter();
+}
+
+// =====================================================================
 // Startup banner
 // =====================================================================
-static const char* kToolVersion = "v1.4";
+static const char* kToolVersion = "v2.0";
 
 static void printBanner() {
     // Enable ANSI / virtual terminal (Windows 10+)
@@ -1028,57 +1232,59 @@ int main() {
     printBanner();
 
     while (true) {
-        con::box({ "MAIN MENU" }, 60, con::Color::Cyan);
+        con::box({ "MAIN MENU  --  SS Tool v2.0" }, 62, con::Color::Cyan);
         std::cout << "\n";
 
-        struct MenuItem { const char* label; const char* desc; };
-
         con::set(con::Color::Magenta);
-        std::cout << "  -- Live process scans --\n";
+        std::cout << "  -- Smart Scan --\n";
         con::reset();
-        static const MenuItem liveItems[] = {
-            { "Memory Scan",      "Scan live Minecraft RAM for cheat client strings"    },
-            { "JVM Flags Scan",   "Detect injected -javaagent and suspicious JVM flags" },
-            { "Module Scan",      "Detect injected/suspicious DLLs in the java process" },
-        };
-        for (int i = 0; i < 3; i++) con::menuItem(i + 1, std::string(liveItems[i].label) + "  --  " + liveItems[i].desc);
+        con::menuItem(1, "Smart Auto-Scan       Auto-detect launcher + JAR + memory + forensics");
 
         std::cout << "\n";
         con::set(con::Color::Magenta);
-        std::cout << "  -- Static / on-disk scans --\n";
+        std::cout << "  -- Live Process Scans --\n";
         con::reset();
-        static const MenuItem staticItems[] = {
-            { "Mods Folder Scan", "Static analysis of .jar files for cheat code"       },
-            { "Macro Scan",       "198M/Zenith detection: process, window, registry,"
-                                   " and executable-signature sweep"                    },
-        };
-        con::menuItem(4, std::string(staticItems[0].label) + "  --  " + staticItems[0].desc);
-        con::menuItem(5, std::string(staticItems[1].label) + "  --  " + staticItems[1].desc);
+        con::menuItem(2, "Memory Scan v2        Multi-threaded, XOR decode, per-client confidence");
+        con::menuItem(3, "JVM Flags Scan        Detect -javaagent injection + suspicious flags");
+        con::menuItem(4, "Module Scan           Detect injected/suspicious DLLs in java process");
 
         std::cout << "\n";
         con::set(con::Color::Magenta);
-        std::cout << "  -- System-wide forensics --\n";
+        std::cout << "  -- Static / On-disk Scans --\n";
         con::reset();
-        con::menuItem(6, "System Forensics  --  Prefetch, autorun, tasks, hosts file, recent jars");
+        con::menuItem(5, "Enhanced JAR Scan     Bytecode heuristics, obfuscation, mixin, whitelist");
+        con::menuItem(6, "Mods Folder Scan      Classic static JAR analysis");
+        con::menuItem(7, "Macro Scan            198M/Zenith: process, window, registry, exe signature");
 
         std::cout << "\n";
-        con::menuItem(7, "Exit");
+        con::set(con::Color::Magenta);
+        std::cout << "  -- Forensics --\n";
+        con::reset();
+        con::menuItem(8, "Extended Forensics    Logs, crash-reports, configs, temp, clipboard");
+        con::menuItem(9, "System Forensics      Prefetch, autorun, tasks, hosts file, recent jars");
 
-        con::prompt("Choose an option (1-7):");
+        std::cout << "\n";
+        con::menuItem(0, "Exit");
+
+        con::prompt("Choose (0-9):");
         int choice = readInt();
         std::cout << "\n";
 
-        if      (choice == 1) runMemoryScan();
-        else if (choice == 2) runJvmFlagsScan();
-        else if (choice == 3) runModuleScan();
-        else if (choice == 4) runModsFolderScanMenu();
-        else if (choice == 5) runMacroSoftwareScan();
-        else if (choice == 6) runSystemForensicsScan();
-        else if (choice == 7) break;
-        else {
-            con::warn("Invalid choice. Please enter 1-7.");
+        switch (choice) {
+            case 1: runSmartAutoScan();       break;
+            case 2: runAdvancedMemoryScan();  break;
+            case 3: runJvmFlagsScan();        break;
+            case 4: runModuleScan();          break;
+            case 5: runEnhancedJarScan();     break;
+            case 6: runModsFolderScanMenu();  break;
+            case 7: runMacroSoftwareScan();   break;
+            case 8: runExtendedForensics();   break;
+            case 9: runSystemForensicsScan(); break;
+            case 0: goto exitLoop;
+            default: con::warn("Invalid choice. Enter 0-9.");
         }
     }
+    exitLoop:
 
     con::box({ "Exiting SS Tool. Goodbye." }, 60, con::Color::Gray);
     std::cout << "\n";

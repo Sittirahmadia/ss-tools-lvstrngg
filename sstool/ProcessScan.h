@@ -195,3 +195,139 @@ static const std::vector<std::string> macroKeywords = {
     "198macro",
     "zenith macro",    // "Zenith Macros"
 };
+
+// ---- User-confirmation macro app launcher ---------------------------
+// When a macro tool is found installed but NOT currently running,
+// the SS-er is offered the choice to open it. The user must explicitly
+// confirm -- this never auto-launches without input.
+struct MacroInstallInfo {
+    std::string name;
+    std::string exePath;   // full path to the .exe
+    std::string installDir;
+};
+
+static std::vector<MacroInstallInfo> findInstalledMacroExes() {
+    std::vector<MacroInstallInfo> found;
+
+    // Check registry uninstall keys for install locations
+    struct RegRoot { HKEY hive; const wchar_t* subkey; };
+    static const RegRoot roots[] = {
+        { HKEY_CURRENT_USER,  L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall" },
+        { HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall" },
+        { HKEY_LOCAL_MACHINE, L"Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall" },
+    };
+
+    for (const auto& root : roots) {
+        HKEY hKey;
+        if (RegOpenKeyExW(root.hive, root.subkey, 0, KEY_READ, &hKey) != ERROR_SUCCESS) continue;
+
+        wchar_t subkeyName[512];
+        DWORD index = 0;
+        while (RegEnumKeyW(hKey, index++, subkeyName, 512) == ERROR_SUCCESS) {
+            HKEY hSub;
+            if (RegOpenKeyExW(hKey, subkeyName, 0, KEY_READ, &hSub) != ERROR_SUCCESS) continue;
+
+            auto readStr = [&](const wchar_t* valueName) -> std::string {
+                wchar_t buf[2048]; DWORD sz = sizeof(buf); DWORD type;
+                if (RegQueryValueExW(hSub, valueName, nullptr, &type, (BYTE*)buf, &sz) == ERROR_SUCCESS
+                    && (type == REG_SZ || type == REG_EXPAND_SZ))
+                    return util::wideToUtf8(buf);
+                return {};
+            };
+
+            std::string displayName = readStr(L"DisplayName");
+            std::string installLoc  = readStr(L"InstallLocation");
+            std::string exePath     = readStr(L"DisplayIcon");
+
+            RegCloseKey(hSub);
+
+            std::string nameLower = util::toLowerA(displayName);
+            for (const auto& kw : macroKeywords) {
+                if (nameLower.find(kw) != std::string::npos) {
+                    // Try to find the actual .exe
+                    std::string resolvedExe = exePath;
+                    if (resolvedExe.empty() && !installLoc.empty()) {
+                        // Scan install dir for .exe files
+                        std::wstring wdir(installLoc.begin(), installLoc.end());
+                        WIN32_FIND_DATAW fd;
+                        std::wstring pattern = wdir + L"\\*.exe";
+                        HANDLE hFind = FindFirstFileW(pattern.c_str(), &fd);
+                        if (hFind != INVALID_HANDLE_VALUE) {
+                            resolvedExe = installLoc + "\\" + util::wideToUtf8(fd.cFileName);
+                            FindClose(hFind);
+                        }
+                    }
+                    // Strip comma-separated icon index from DisplayIcon
+                    size_t comma = resolvedExe.find(',');
+                    if (comma != std::string::npos) resolvedExe = resolvedExe.substr(0, comma);
+
+                    found.push_back({ displayName, resolvedExe, installLoc });
+                    break;
+                }
+            }
+        }
+        RegCloseKey(hKey);
+    }
+    return found;
+}
+
+// Present the found macro install to the SS-er and ask if they want
+// to open it. Returns true if the user chose to launch it.
+static bool offerToLaunchMacroApp(const MacroInstallInfo& app) {
+    std::cout << "\n";
+    con::set(con::Color::Yellow);
+    std::cout << "  +----------------------------------------------------------+\n";
+    std::cout << "  |  MACRO APP DETECTED (not currently running)              |\n";
+    std::cout << "  +----------------------------------------------------------+\n";
+    con::reset();
+    con::bad("Installed: " + app.name);
+    if (!app.exePath.empty()) con::dim("Executable: " + app.exePath);
+    if (!app.installDir.empty()) con::dim("Install dir: " + app.installDir);
+
+    std::cout << "\n";
+    con::set(con::Color::Yellow);
+    std::cout << "  [?] Apakah kamu ingin membuka aplikasi ini untuk inspeksi?\n";
+    con::reset();
+    con::menuItem(1, "Ya, buka sekarang  (akan meminta konfirmasi UAC jika perlu)");
+    con::menuItem(2, "Tidak, skip");
+    con::prompt("Pilih (1 atau 2):");
+
+    int choice = 0;
+    std::string line;
+    std::getline(std::cin, line);
+    try { choice = std::stoi(line); } catch (...) {}
+
+    if (choice != 1) {
+        con::info("Skipped. Install path logged above as evidence.");
+        return false;
+    }
+
+    if (app.exePath.empty()) {
+        con::warn("No executable path found -- cannot launch. Open install folder manually.");
+        if (!app.installDir.empty()) {
+            std::string cmd = "explorer \"" + app.installDir + "\"";
+            ShellExecuteA(nullptr, "open", "explorer.exe", app.installDir.c_str(), nullptr, SW_SHOWNORMAL);
+        }
+        return false;
+    }
+
+    // Launch with ShellExecuteA "runas" so Windows shows the UAC prompt
+    // naturally -- the user sees exactly what's being run and can cancel.
+    HINSTANCE result = ShellExecuteA(
+        nullptr,
+        "runas",                  // triggers UAC if needed
+        app.exePath.c_str(),
+        nullptr,
+        nullptr,
+        SW_SHOWNORMAL
+    );
+
+    if ((intptr_t)result > 32) {
+        con::ok("Launched. The macro app window should appear shortly.");
+        con::dim("Take a screenshot as evidence once the window is visible.");
+        return true;
+    } else {
+        con::warn("Launch failed (user cancelled UAC, or executable not found).");
+        return false;
+    }
+}
