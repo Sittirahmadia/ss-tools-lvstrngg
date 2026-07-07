@@ -32,4 +32,3 @@ jobs:
           name: sstool-x64-release
           path: x64/Release/sstool.exe
           if-no-files-found: error
-          

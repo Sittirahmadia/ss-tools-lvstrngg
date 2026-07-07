@@ -1,5 +1,10 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
+#define GUI_MODE  // routes all con:: output to ImGui log buffer
+
+// GuiApp.h must come first -- it defines guiapp::g_state and the
+// logXxx() functions that Console.h's GUI-mode branches call.
+#include "GuiApp.h"
 #include "Console.h"
 #include "Util.h"
 #include "PatternScan.h"
@@ -14,6 +19,8 @@
 #include "LauncherDetect.h"
 #include "EnhancedJarScan.h"
 #include "ForensicsExtended.h"
+#include "NetworkScan.h"
+#include "WindowCloakScan.h"
 #include <filesystem>
 #include <cstdlib>
 #include <string>
@@ -1196,98 +1203,91 @@ void runExtendedForensics() {
 }
 
 // =====================================================================
+// Network Scan -- active connections to known cheat-client hosts
+// =====================================================================
+void runNetworkScan() {
+    con::header("NETWORK SCAN  --  Active Connections to Cheat-Client Hosts");
+    con::dim("Checks active TCP connections from java/unknown processes against");
+    con::dim("known cheat-client license/auth/webhook hostnames.\n");
+
+    con::step(1, 1, "Enumerating TCP Connections");
+    auto findings = networkscan::scanConnections();
+
+    int dangerCount = 0;
+    for (const auto& f : findings) {
+        if (f.severity == util::Severity::Danger) dangerCount++;
+        con::finding(f.severity, f.text);
+    }
+
+    con::resultSummary(dangerCount == 0, dangerCount, "cheat-host connection(s)");
+    waitEnter();
+}
+
+// =====================================================================
+// Window Cloak Scan -- windows hidden from screen capture
+// =====================================================================
+void runWindowCloakScan() {
+    con::header("WINDOW CLOAK SCAN  --  Screen-Capture-Hidden Windows");
+    con::dim("Checks every visible window's display affinity. A window can mark");
+    con::dim("itself invisible to screen capture (OBS, Discord, this screenshare)");
+    con::dim("while staying visible to the person at the PC -- a real technique");
+    con::dim("some overlay/macro tools use to hide during screenshares.\n");
+
+    con::step(1, 1, "Checking Window Display Affinity");
+    auto findings = windowcloak::scan();
+
+    int dangerCount = 0;
+    for (const auto& f : findings) {
+        if (f.severity == util::Severity::Danger) dangerCount++;
+        con::finding(f.severity, f.text);
+    }
+
+    con::resultSummary(dangerCount == 0, dangerCount, "hidden window(s)");
+    waitEnter();
+}
+
+// =====================================================================
 // Startup banner
 // =====================================================================
 static const char* kToolVersion = "v2.0";
 
-static void printBanner() {
-    // Enable ANSI / virtual terminal (Windows 10+)
-    DWORD mode = 0;
-    GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &mode);
-    SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-
-    con::box({
-        "",
-        std::string("SS TOOL  --  by lvstrng  ") + kToolVersion,
-        "Minecraft Screenshare / Cheat Detection",
-        "",
-    }, 60, con::Color::Cyan);
-
-    std::cout << "\n";
-    bool elevated = util::isRunningElevated();
-    con::statusLine("Mode", "Read-only  (nothing on this PC is modified)", con::Color::Green);
-    con::statusLine("Running as", elevated ? "Administrator" : "Standard user",
-        elevated ? con::Color::Green : con::Color::Yellow);
-    if (!elevated) {
-        con::statusLine("", "Re-run as Administrator for full memory read access.", con::Color::Gray);
-    }
-    con::statusLine("Modules", "6 scans  (Memory / Mods / JVM / Macro / Module / Forensics)", con::Color::White);
-    std::cout << "\n";
-}
-
 // =====================================================================
-// Main menu
+// WinMain -- GUI entry point
+// All scan functions run on a detached background thread so the ImGui
+// render loop stays at 60fps during long scans.
 // =====================================================================
-int main() {
-    printBanner();
 
-    while (true) {
-        con::box({ "MAIN MENU  --  SS Tool v2.0" }, 62, con::Color::Cyan);
-        std::cout << "\n";
+// Dispatch table: index matches kNavItems in GuiApp.h
+static void dispatchScan(int idx) {
+    if (guiapp::g_state.scanning.load()) return;
+    guiapp::g_state.scanning = true;
+    guiapp::g_state.scanDone = false;
+    guiapp::g_state.progressPct = 0;
+    guiapp::g_state.currentScanName = guiapp::kNavItems[idx].label;
 
-        con::set(con::Color::Magenta);
-        std::cout << "  -- Smart Scan --\n";
-        con::reset();
-        con::menuItem(1, "Smart Auto-Scan       Auto-detect launcher + JAR + memory + forensics");
-
-        std::cout << "\n";
-        con::set(con::Color::Magenta);
-        std::cout << "  -- Live Process Scans --\n";
-        con::reset();
-        con::menuItem(2, "Memory Scan v2        Multi-threaded, XOR decode, per-client confidence");
-        con::menuItem(3, "JVM Flags Scan        Detect -javaagent injection + suspicious flags");
-        con::menuItem(4, "Module Scan           Detect injected/suspicious DLLs in java process");
-
-        std::cout << "\n";
-        con::set(con::Color::Magenta);
-        std::cout << "  -- Static / On-disk Scans --\n";
-        con::reset();
-        con::menuItem(5, "Enhanced JAR Scan     Bytecode heuristics, obfuscation, mixin, whitelist");
-        con::menuItem(6, "Mods Folder Scan      Classic static JAR analysis");
-        con::menuItem(7, "Macro Scan            198M/Zenith: process, window, registry, exe signature");
-
-        std::cout << "\n";
-        con::set(con::Color::Magenta);
-        std::cout << "  -- Forensics --\n";
-        con::reset();
-        con::menuItem(8, "Extended Forensics    Logs, crash-reports, configs, temp, clipboard");
-        con::menuItem(9, "System Forensics      Prefetch, autorun, tasks, hosts file, recent jars");
-
-        std::cout << "\n";
-        con::menuItem(0, "Exit");
-
-        con::prompt("Choose (0-9):");
-        int choice = readInt();
-        std::cout << "\n";
-
-        switch (choice) {
-            case 1: runSmartAutoScan();       break;
-            case 2: runAdvancedMemoryScan();  break;
-            case 3: runJvmFlagsScan();        break;
-            case 4: runModuleScan();          break;
-            case 5: runEnhancedJarScan();     break;
-            case 6: runModsFolderScanMenu();  break;
-            case 7: runMacroSoftwareScan();   break;
-            case 8: runExtendedForensics();   break;
-            case 9: runSystemForensicsScan(); break;
-            case 0: goto exitLoop;
-            default: con::warn("Invalid choice. Enter 0-9.");
+    std::thread([idx]() {
+        switch (idx) {
+            case 0: runSmartAutoScan();       break;
+            case 1: runAdvancedMemoryScan();  break;
+            case 2: runJvmFlagsScan();        break;
+            case 3: runModuleScan();          break;
+            case 4: runEnhancedJarScan();     break;
+            case 5: runModsFolderScanMenu();  break;
+            case 6: runMacroSoftwareScan();   break;
+            case 7: runExtendedForensics();   break;
+            case 8: runSystemForensicsScan(); break;
+            case 9: runNetworkScan();         break;
+            case 10: runWindowCloakScan();    break;
         }
-    }
-    exitLoop:
-
-    con::box({ "Exiting SS Tool. Goodbye." }, 60, con::Color::Gray);
-    std::cout << "\n";
-
-    return 0;
+        // Mark done if resultSummary() wasn't called (e.g. early return)
+        if (!guiapp::g_state.scanDone.load()) {
+            guiapp::g_state.scanning = false;
+            guiapp::g_state.scanDone = true;
+        }
+    }).detach();
 }
+
+int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
+    return guiapp::Run(dispatchScan);
+}
+

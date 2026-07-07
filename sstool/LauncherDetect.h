@@ -366,6 +366,11 @@ namespace launcherdetect {
             con::warn("No Minecraft installations found.");
             return;
         }
+    static void printInstances(const std::vector<MinecraftInstance>& instances) {
+        if (instances.empty()) {
+            con::warn("No Minecraft installations found.");
+            return;
+        }
         for (size_t i = 0; i < instances.size(); i++) {
             const auto& inst = instances[i];
             std::error_code ec;

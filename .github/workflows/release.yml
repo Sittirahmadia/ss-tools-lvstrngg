@@ -44,4 +44,3 @@ jobs:
         with:
           files: sstool-${{ github.ref_name }}-x64.zip
           generate_release_notes: true
-          

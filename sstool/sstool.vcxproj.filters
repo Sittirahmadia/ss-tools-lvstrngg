@@ -68,5 +68,14 @@
     <ClInclude Include="ForensicsExtended.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="GuiApp.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="NetworkScan.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="WindowCloakScan.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>
